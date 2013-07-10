@@ -1,0 +1,549 @@
+// Creates the player rank table for solo-based maps, where each player
+// competes against one another to the finish.
+//
+// Author: 
+// Positron
+//
+// License:
+// Free for any purpose. I'm not liable for any damages.
+
+#library "jmrsolo"
+#include "zcommon.acs"
+
+#import "constants.acs"
+#import "utility.acs"
+#import "timer.acs"
+#import "luk.acs"
+
+#import "ranker_hs.acs"
+
+// Start script number.
+#libdefine JRS_SCRIPT_START 950
+
+// Time to wait in tics before displaying the updated table after a player
+// crosses the finish line.
+#define JRS_SHOW_DELAY_TIME 16
+#define JRS_INDI_TIME_LINEID 732
+
+// Time, in seconds, to wait before automatically showing record details.
+#define JRS_AUTO_SHOW_DELAY 3
+#define JRS_RANK_LIMIT_MIN 3
+#define JRS_RANK_LIMIT_MAX 5
+
+// This variable will store the amount of players to dispaly.
+int _jrs_show_limit = JRS_RANK_LIMIT_MAX;
+// Rank number colors.
+int _jrs_rank_colors[ JRS_RANK_LIMIT_MAX ] = {
+   "f", // Gold
+   "j", // Silver
+   "e", // Brown
+   "n", // Light blue
+   "t", // Purple
+};
+
+// The refresh time is the time in seconds it takes to re-display the table.
+// This is needed to reflect name changes if people who are ranked change 
+// their name. We set it to eight seconds to preserve bandwidth.
+#define JRS_TBL_REFRESH_TIME 8
+#define JRS_TBL_X 250
+#define JRS_TBL_Y 45100
+#define JRS_TBL_LINE_HEIGHT 2900
+// The offset is used to prevent ID conflicts in HudMessages from
+// other scripts.
+#define JRS_TBL_LINEID_OFFSET 733
+
+// Ranked player properties:
+#define JRS_IDX_NUM 0
+#define JRS_IDX_MINUTES 1
+#define JRS_IDX_SECONDS 2
+#define JRS_IDX_CENTISECONDS 3
+
+// Holds players that completed map.
+bool _jrs_finished[ MAX_PLAYERS ]; 
+// Contains information about a player's finish time.
+int _jrs_table[ JRS_RANK_LIMIT_MAX ][ 4 ];
+int _jrs_table_size = 0;
+
+// Start.
+script JRS_SCRIPT_START ( void ) {
+   if ( is_online() ) {
+      // Load high score.
+      if ( JrhIsEnabled() ) {
+         JrhSetLoadScript( 955 );
+         JrhSetDetailsScript( 956 );
+         acs_ExecuteWait( 955, 0 );
+      }
+
+      // Run table refresh script.
+      acs_Execute( 951, 0 );
+   }
+}
+
+// Table display refresh.
+script 951 ( void ) {
+   int time_passed = 0;
+   int limit = 0;
+
+   while ( true ) {
+      limit = getCVar( "jm_table_show_limit" );
+
+      // Table display limit check.
+      if ( limit != _jrs_show_limit && 
+         // Only update the show limit if it's within our limits.
+         limit >= JRS_RANK_LIMIT_MIN && 
+         limit <= JRS_RANK_LIMIT_MAX ) {
+         JrsClearTable();
+         _jrs_show_limit = limit;
+         JrsShowTable();
+      }
+      // Table refresh.
+      else if ( time_passed % JRS_TBL_REFRESH_TIME == 0 ) {
+         JrsShowTable();
+      }
+
+      delay( TICS_IN_SECOND );
+      time_passed += 1;
+   }
+}
+
+script 954 ENTER {
+   JrsClearIndividualTime();
+}
+
+function void JrsFinish( void ) {
+   int finish_time = TimerGetTics();
+   int player = playerNumber();
+
+   if ( player >= 0 && ! JrsIsFinished( player ) ) {
+      JrsRemember( player, true );
+
+      // In multiplayer, register player in table.
+      if ( is_online() ) {
+         acs_ExecuteAlways( 952, 0, player, finish_time );
+      }
+      // In single player, show individual time.
+      else {
+         JrsShowIndividualTime( finish_time );
+      }
+   }
+}
+
+function bool JrsIsFinished( int player ) {
+   return _jrs_finished[ player ];
+}
+
+function void JrsRemember( int player, bool toRemember ) {
+   _jrs_finished[ player ] = toRemember;
+}
+
+// Adds player to table.
+script 952 ( int player, int playerTime ) {
+   bool is_added = false;
+
+   // Add player into table if spots are available.
+   if ( _jrs_table_size < JRS_RANK_LIMIT_MAX ) {
+      JrsSaveInTable( player, playerTime );
+      is_added = true;
+
+      // High score.
+      // Only first ranked player matters for high score.
+      if ( _jrs_table_size == 1 ) {
+         // Confirm we have new record.
+         if ( JrhIsEnabled() && JrhIsNew( playerTime ) ) {
+            // Make sure no cheating has occured.
+            if ( ! JrhIsCheater( player ) ) {
+               JrsHsSave( player, playerTime );
+               JrsHsAnnounceNew();
+               // Reload high score from luk.
+               acs_ExecuteWait( 955, 0 );
+            }
+            // Otherwise, tell everybody a nice message.
+            else {
+               JrsHsAnnounceCheat();
+            }
+         }
+      }
+   }
+
+   // Display.
+
+   // Small delay to replicate old script's delay effect.
+   delay( JRS_SHOW_DELAY_TIME );
+
+   // Show updated table if modified and show-limit isn't passed.
+   if ( is_added && _jrs_table_size <= _jrs_show_limit ) {
+      JrsShowTable();
+   }
+   // Otherwise, show individual time for player.
+   else {
+      JrsShowIndividualTime( playerTime );
+   }
+}
+
+function void JrsSaveInTable( int playerNum, int timeInTics ) {
+   _jrs_table[ _jrs_table_size ][ JRS_IDX_NUM ] = playerNum;
+
+   int seconds = timeInTics / TICS_IN_SECOND;
+   _jrs_table[ _jrs_table_size ][ JRS_IDX_MINUTES ] =
+      seconds / SECONDS_IN_MINUTE;
+   _jrs_table[ _jrs_table_size ][ JRS_IDX_SECONDS ] = 
+      seconds % SECONDS_IN_MINUTE;
+   _jrs_table[ _jrs_table_size ][ JRS_IDX_CENTISECONDS ] =
+      cal_cseconds( timeInTics % TICS_IN_SECOND );
+
+   _jrs_table_size += 1;
+}
+
+function int JrsGetPosition( int player ) {
+   for ( int pos = 0; pos < _jrs_table_size; pos += 1 ) {
+      if ( _jrs_table[ pos ][ JRS_IDX_NUM ] == player ) {
+         return pos;
+      }
+   }
+
+   return VALUE_NONE;
+}
+
+script 953 ( int player ) DISCONNECT {
+   if ( JrsIsFinished( player ) ) {
+      JrsRemember( player, false );
+      JrsRemoveFromTable( player );
+      delay( JRS_SHOW_DELAY_TIME );
+      JrsShowTable();
+   }
+}
+
+function void JrsRemoveFromTable( int player ) {
+   int pos = JrsGetPosition( player );
+   if ( pos != VALUE_NONE ) {
+      // We indicate that a player has disconnected by
+      // removing the player's number with a predefined value.
+      _jrs_table[ pos ][ JRS_IDX_NUM ] = VALUE_NONE;
+   }
+}
+
+function void JrsShowTable( void ) {
+   // We need to set the font to small. Otherwise, the font will
+   // vary at different times due to the jumpmaze timer.
+   setFont( "SMALLFONT" );
+
+   // Determine the starting height of the table based on the current
+   // rank limit.
+   int line_height = JRS_TBL_Y + 
+      ( ( JRS_RANK_LIMIT_MAX - _jrs_show_limit ) * JRS_TBL_LINE_HEIGHT );
+   int line_id = JRS_TBL_LINEID_OFFSET;
+
+   // We only display the high score if we have one.
+   if ( JrhIsSet() ) {
+      int record_line_height = line_height - JRS_TBL_LINE_HEIGHT;
+      JrsHsShowFinishTime( line_id, record_line_height );
+      line_id += 1;
+   }
+
+   // Determine the amount of lines to display.
+   int places_to_display = _jrs_table_size;
+   if ( places_to_display > _jrs_show_limit ) {
+      places_to_display = _jrs_show_limit;
+   }
+
+   for ( int place = 0; place < places_to_display; place += 1 ) {
+      int player = _jrs_table[ place ][ JRS_IDX_NUM ];
+      str suffix = ordinal_suffix( place + 1 );
+
+      int minutes = _jrs_table[ place ][ JRS_IDX_MINUTES ];
+      str minutes_p = number_prefix( minutes );
+      int seconds = _jrs_table[ place ][ JRS_IDX_SECONDS ];
+      str seconds_p = number_prefix( seconds );
+      int centiseconds = _jrs_table[ place ][ JRS_IDX_CENTISECONDS ];
+      str centiseconds_p = number_prefix( centiseconds );
+
+      // Present players:
+      if ( player != VALUE_NONE ) {
+         hudMessageBold(
+            s : "\c", s : _jrs_rank_colors[ place ],
+            i : place + 1, s : suffix, s : ":\c- ",
+            n : player + 1,
+            s : "\n\ciTime: \cb",
+            s : minutes_p, i : minutes, 
+            s : ":",
+            s : seconds_p, i : seconds,
+            s : "\cs.",
+            s : centiseconds_p, i : centiseconds,
+            s : "\c-" ;
+            HUDMSG_PLAIN, line_id, 0, JRS_TBL_X, line_height, 0
+         );
+      }
+      // Disconnected players:
+      else {
+         hudMessageBold( 
+            s : "\c", s : _jrs_rank_colors[ place ],
+            i : place + 1, s : suffix, 
+            s : ": \cgDisconnected\c-\n",
+            s : "\ciTime: \cb",
+            s : minutes_p, i : minutes,
+            s : ":",
+            s : seconds_p, i : seconds,
+            s : "\cs.",
+            s : centiseconds_p, i : centiseconds,
+            s : "\c-" ;
+            HUDMSG_PLAIN, line_id, 0, JRS_TBL_X, line_height, 0
+         );
+      }
+
+      line_height += JRS_TBL_LINE_HEIGHT;
+      line_id += 1;
+   }
+}
+
+function void JrsClearTable( void ) {
+   int lines_to_clear = _jrs_show_limit;
+
+   // Clear the extra record time line.
+   if ( JrhIsSet() ) {
+      lines_to_clear += 1;
+   }
+
+   for ( int line = 0; line < lines_to_clear; line += 1 ) {
+      // We clear the previous rendition by using the same
+      // message ID, but this time, using a blank string.
+      clear_message_bold( JRS_TBL_LINEID_OFFSET + line );
+   }
+}
+
+function void JrsShowIndividualTime( int timeInTics ) {
+   setFont( "SMALLFONT" );
+
+   // Calculate the individual time to display:
+   int time = timeInTics / TICS_IN_SECOND;
+   int minutes = time / SECONDS_IN_MINUTE;
+   int seconds = time % SECONDS_IN_MINUTE;
+   int centiseconds = cal_cseconds( timeInTics % TICS_IN_SECOND );
+
+   hudMessage(
+      s : "\crTime: \cc", 
+      s : number_prefix( minutes ), i : minutes, 
+      s : ":", 
+      s : number_prefix( seconds ), i : seconds,
+      s : "\cu.",
+      s : "", s : number_prefix( centiseconds ), i : centiseconds, 
+      s : "\c-" ;
+      HUDMSG_PLAIN, JRS_INDI_TIME_LINEID, 0, JRS_TBL_X, 
+      JRS_TBL_Y + ( JRS_TBL_LINE_HEIGHT * JRS_RANK_LIMIT_MAX ), 0
+   );
+}
+
+function void JrsClearIndividualTime( void ) {
+   clear_message( JRS_INDI_TIME_LINEID );
+}
+
+// High Score (luk-specific functions and scripts)
+// ---------------------------------------------------------------------------
+
+#define JRS_HS_TBL_X -1.75
+#define JRS_HS_TBL_Y 0.7
+#define JRS_HS_TBL_LINE JRH_LINE_NOTICE
+#define JRS_HS_TBL_LINE_HEIGHT 1000
+#define JRS_HS_TBL_SHOW_TIME 8.0
+
+// luk database record keys.
+str JRS_HS_RTIME = "jrs_hs_time";
+str JRS_HS_RAUTHOR = "jrs_hs_author";
+str JRS_HS_RDATE = "jrs_hs_rdate";
+
+// High score author.
+int _jrs_hs_author[ LUK_MAX_STR_VALUE_SIZE ];
+
+// High score finish time.
+int _jrs_hs_minutes = VALUE_NONE;
+int _jrs_hs_seconds = VALUE_NONE;
+int _jrs_hs_centiseconds = VALUE_NONE;
+
+// High score date. 
+int _jrs_hs_year = 0;
+int _jrs_hs_month = 0;
+int _jrs_hs_day = 0;
+
+// High score loading.
+script 955 ( void ) {
+   JrhSetLoadStatus( JRH_STATUS_WORKING );
+
+   // Load high score finish time.
+   acs_ExecuteWait( 970, 0, LUK_RETQUERY_INT, JRS_HS_RTIME );
+
+   int result = LukGetQueryResult();
+   if ( result != LUK_RESULT_OK ) {
+      // If luk returns an error code, that means no high score is set.
+      if ( result == LUK_RESULT_FAILED ) {
+         JrhSetLoadStatus( JRH_STATUS_LOADED );
+      }
+      // Error.
+      else {
+         JrhSetLoadStatus( JRH_STATUS_ERROR );
+      }
+
+      terminate;
+   }
+
+   JrsHsSetFinishTime( LukGetData() );
+
+   // Load author of high score.
+   acs_ExecuteWait( 970, 0, LUK_RETQUERY_STR, JRS_HS_RAUTHOR );
+
+   if ( LukGetQueryResult() != LUK_RESULT_OK ) {
+      JrhSetLoadStatus( JRH_STATUS_ERROR );
+      terminate;
+   }
+
+   JrsHsSetAuthor();
+
+   // Load date of high score.
+   acs_ExecuteWait( 970, 0, LUK_RETQUERY_DATE, JRS_HS_RDATE );
+
+   if ( LukGetQueryResult() != LUK_RESULT_OK ) {
+      JrhSetLoadStatus( JRH_STATUS_ERROR );
+      terminate;
+   }
+
+   _jrs_hs_year = LukGetDateYear();
+   _jrs_hs_month = LukGetDateMonth();
+   _jrs_hs_day = LukGetDateDay();
+
+   JrhSetLoadStatus( JRH_STATUS_LOADED );
+}
+
+// Sets the finish time, in tics, of the high score and converts it into more
+// familiar units like minutes and seconds.
+function void JrsHsSetFinishTime( int tics ) {
+   if ( tics > 0 ) {
+      int seconds = tics / TICS_IN_SECOND;
+
+      _jrs_hs_minutes = seconds / SECONDS_IN_MINUTE;
+      _jrs_hs_seconds = seconds % SECONDS_IN_MINUTE;
+      _jrs_hs_centiseconds = cal_cseconds( tics % TICS_IN_SECOND );
+
+      JrhSetFinishTime( tics );
+   }
+}
+
+// Sets the author of the high score by copying the name from luk library's
+// temporary buffer to ours.
+function void JrsHsSetAuthor( void ) {
+   for ( int c = 0; c < LUK_MAX_STR_VALUE_SIZE; c += 1 ) {
+      _jrs_hs_author[ c ] = _luk_str_value[ c ];
+
+      if ( _luk_str_value[ c ] == '\0' ) {
+         break;
+      }
+   }
+}
+
+// Saves high score and all of its details in permanent storage.
+function void JrsHsSave( int player, int tics ) { 
+   LukStoreName( JRS_HS_RAUTHOR, player );
+   LukStoreInt( JRS_HS_RTIME, tics );
+   LukStoreDate( JRS_HS_RDATE );
+}
+
+function void JrsHsShowFinishTime( int lineId, int lineHeight ) {
+   setFont( "SMALLFONT" );
+   hudMessageBold(
+      s : "\cnRecord: \cb",
+      s : number_prefix( _jrs_hs_minutes ), i : _jrs_hs_minutes, 
+      s : ":", 
+      s : number_prefix( _jrs_hs_seconds ), i : _jrs_hs_seconds, 
+      s : "\cs.",
+      s : number_prefix( _jrs_hs_centiseconds ), i : _jrs_hs_centiseconds, 
+      s : "\c-" ;
+      HUDMSG_PLAIN, lineId, 0, JRS_TBL_X, lineHeight, 0
+   );
+}
+
+function void JrsHsAnnounceNew( void ) {
+   setFont( "SMALL" );
+   hudMessageBold(
+      s : "\cd", n : 0, s : "\cd set a new map record!\c-" ;
+      HUDMSG_FADEOUT | HUDMSG_LOG, 1900, 0, 1.5, 0.15, 5.0, 1.0
+   );
+   ambientSound( "JM2HSWIN", 127 );
+}
+
+function void JrsHsAnnounceCheat( void ) {
+   hudMessageBold( 
+      s : "\cgClever \cc", n : 0, s : "\cg tried to cheat to the ",
+      s : "high score\c-" ;
+      HUDMSG_FADEOUT | HUDMSG_LOG, 1900, 0, 1.5, 0.15, 5.0, 1.0
+   );
+   ambientSound( "JM2HSLOS", 127 );
+}
+
+// Prints high score details table.
+script 956 ( int showTime ) {
+   int y = JRS_HS_TBL_Y;
+   int line_id = JRS_HS_TBL_LINE;
+
+   setFont( "SMALLFONT" );
+
+   // Header:
+   hudMessage(
+      s : "\ciRecord details\c-" ;
+      HUDMSG_FADEOUT, line_id, 0, JRS_HS_TBL_X, y, showTime, 1.0
+   );
+
+   y += JRS_HS_TBL_LINE_HEIGHT * 2;
+   line_id += 1;
+
+   // Record date:
+   hudMessage(
+      s : "\ckDate Set:\c-" ;
+      HUDMSG_FADEOUT, line_id, 0, JRS_HS_TBL_X, y, showTime, 1.0
+   );
+
+   y += JRS_HS_TBL_LINE_HEIGHT;
+   line_id += 1;
+
+   hudMessage(
+      s : "\cc", s : conv_month_string( _jrs_hs_month ), 
+      s : " ", i : _jrs_hs_day, s : ", ", i : _jrs_hs_year, s : "\c-" ;
+      HUDMSG_FADEOUT, line_id, 0, JRS_HS_TBL_X, y, showTime, 1.0
+   );
+
+   y += JRS_HS_TBL_LINE_HEIGHT * 2;
+   line_id += 1;
+
+   // Record time:
+   hudMessage(
+      s : "\ckFinish Time:\c-" ;
+      HUDMSG_FADEOUT, line_id, 0, JRS_HS_TBL_X, y, showTime, 1.0
+   );
+
+   y += JRS_HS_TBL_LINE_HEIGHT;
+   line_id += 1;
+
+   hudMessage(
+      s : "\cb",
+      s : number_prefix( _jrs_hs_minutes ), i : _jrs_hs_minutes, 
+      s : ":", 
+      s : number_prefix( _jrs_hs_seconds ), i : _jrs_hs_seconds, 
+      s : "\cs.",
+      s : number_prefix( _jrs_hs_centiseconds ), i : _jrs_hs_centiseconds, 
+      s : "\c-" ;
+      HUDMSG_FADEOUT, line_id, 0, JRS_HS_TBL_X, y, showTime, 1.0
+   );
+
+   y += JRS_HS_TBL_LINE_HEIGHT * 2;
+   line_id += 1;
+
+   // Record holder:
+   hudMessage(
+      s : "\ckRecord Holder:\c-" ;
+      HUDMSG_FADEOUT, line_id, 0, JRS_HS_TBL_X, y, showTime, 1.0
+   );
+
+   y += JRS_HS_TBL_LINE_HEIGHT;
+   line_id += 1;
+
+   hudMessage(
+      s : "\cc", a : _jrs_hs_author, s : "\c-" ;
+      HUDMSG_FADEOUT, line_id, 0, JRS_HS_TBL_X, y, showTime, 1.0
+   );
+}
